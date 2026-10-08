@@ -42,6 +42,13 @@
 #          （v2.9.2 的 cover 铺满会把横图/方图裁掉一大半，看起来像"被拉伸、看不全"）
 #   [修复] 卡片模式同样不再对素材裁边（theme_01 原来固定裁掉右侧 28%），整张原图进卡片
 #   [修复] 小图不再有损放大：卡片最多放大 1.25 倍、整图模式一律不放大，宁可小一点也不糊
+#
+# v2.9.4 相对 v2.9.3 的改动：
+#   [修复] 改完账号密码不能立刻生效：手动重连（reconnect.flag）现在会把退避/冷却节奏一并归零，
+#          此前该分支虽不受退避限制，但一次失败后 failStreak 仍会从上次的计数继续累加，
+#          密码填错后改对，最坏要等满 60 分钟冷却才会重试。
+#   [新增] 配合 set_account.ps1：保存账号密码成功后自动写 reconnect.flag，
+#          实现「保存即自动重试一次」，不必再手动双击 立即重连.bat。
 
 $ErrorActionPreference = "Continue"
 
@@ -1491,10 +1498,18 @@ $nextLoginAt   = [datetime]::MinValue
 
 while ($true) {
     Write-Hb
-    # 手动重连
+    # 手动重连（也可由 设置账号密码.ps1 保存成功后自动触发）
     if (Test-Path $reconnectFile) {
         try { Remove-Item $reconnectFile -Force -ErrorAction Stop } catch {}
         Log "MANUAL: 收到立即重连请求" "INFO"
+        # [v2.9.4] 手动重连 = 人明确要求"现在就用最新配置试一次"：把退避/冷却节奏一并归零。
+        # 否则 failStreak 仍带着旧计数往下走，密码填错后改成对的，最坏要等满 60 分钟冷却才重试。
+        # （本分支在退避判断之前，所以归零后这次登录必定立即执行。）
+        if ($script:failStreak -ne 0) {
+            Log ("MANUAL: 重试节奏归零（此前连续失败 " + $script:failStreak + " 次）") "INFO"
+        }
+        $script:failStreak = 0
+        $nextLoginAt = [datetime]::MinValue
         InvokeLogin
         $lastProbe = Get-Date
         Start-Sleep -Seconds $retryAfterSec

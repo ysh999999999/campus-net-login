@@ -2,6 +2,8 @@
 # v2.0 改动：密码框掩码显示、写入改为原子替换 + .bak 备份、保存前做校验、错误信息本地化
 # v2.1 修复：File.Replace 的第三个参数改传真实备份路径（原来传 $null 被 PS 变成空串，
 #            触发 "The path is not of a legal form."，导致密码一直保存不了）
+# v2.2 新增：保存成功后自动触发一次重连（写 config\reconnect.flag，必要时拉起监控），
+#            让「保存即生效」真正成立 —— 此前改完密码最坏要等满 60 分钟冷却才会重试。
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -17,6 +19,40 @@ function Read-Config {
     if (-not (Test-Path $configPath)) { return $null }
     try { return (Get-Content $configPath -Raw -Encoding UTF8 | ConvertFrom-Json) }
     catch { return $null }
+}
+
+# [v2.2] 保存成功后立即触发一次重连：写 config\reconnect.flag，监控会在 10 秒内用新密码重试。
+# 监控没在运行的话顺手把它拉起来（判定方式与 立即重连.bat 一致）。返回一句给用户看的结果说明。
+function Invoke-ImmediateReconnect {
+    $cfgDir = Join-Path $rootDir "config"
+    if (-not (Test-Path $cfgDir)) {
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+    }
+    Set-Content -Path (Join-Path $cfgDir "reconnect.flag") `
+                -Value (Get-Date -Format "yyyy-MM-dd HH:mm:ss") -Encoding UTF8
+
+    $running = $true
+    try {
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop |
+                   Where-Object { $_.CommandLine -like "*monitor.ps1*" })
+        $running = ($procs.Count -ge 1)
+    } catch {
+        # 查不到就当作它正在跑：标志文件不会丢，最坏只是晚一点被消费，不误报错误
+        $running = $true
+    }
+    if ($running) {
+        return "已通知监控，约 10 秒内会用新密码重试一次（结果见 logs\monitor.log）。"
+    }
+
+    $mon = Join-Path $scriptDir "monitor.ps1"
+    if (-not (Test-Path $mon)) {
+        return "但监控未在运行、也没找到 monitor.ps1，请双击 恢复监控.bat。"
+    }
+    Start-Process -FilePath "powershell.exe" `
+                  -ArgumentList @("-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$mon`"") `
+                  -WorkingDirectory $rootDir | Out-Null
+    Start-Sleep -Seconds 2
+    return "监控此前未在运行，已自动启动，它会立刻用新密码尝试登录。"
 }
 
 $cfg = Read-Config
@@ -48,7 +84,7 @@ $cb.Text = "显示密码"; $cb.Location = New-Object Drawing.Point(90, 84); $cb.
 $cb.Add_CheckedChanged({ $t2.UseSystemPasswordChar = -not $cb.Checked })
 
 $l3 = New-Object Windows.Forms.Label
-$l3.Text = "保存后立即生效，无需重新安装。"
+$l3.Text = "保存后会自动重连一次，无需重装 / 重启电脑。"
 $l3.Location = New-Object Drawing.Point(20, 112); $l3.AutoSize = $true
 
 $l4 = New-Object Windows.Forms.Label
@@ -91,7 +127,16 @@ $b.Add_Click({
             [System.IO.File]::Move($tmpPath, $configPath)   # 首次生成配置，无需备份
         }
 
-        [Windows.Forms.MessageBox]::Show("已保存，下次运行自动生效。", "提示") | Out-Null
+        # [v2.2] 保存成功后自动触发一次重连，让「保存即生效」真正成立：
+        # 之前改完密码最坏要等满 60 分钟冷却才会重试，看起来像"没反应"。
+        $reconMsg = ""
+        try { $reconMsg = Invoke-ImmediateReconnect }
+        catch { $reconMsg = "但自动重连通知失败，请手动双击一次 立即重连.bat。" }
+
+        [Windows.Forms.MessageBox]::Show(
+            ("账号密码已保存，程序已按新密码重新尝试登录。" + [Environment]::NewLine +
+             $reconMsg + [Environment]::NewLine +
+             "不需要重新安装，也不需要重启电脑。"), "已生效") | Out-Null
         $form.Close()
     } catch {
         if (Test-Path $tmpPath) { try { [System.IO.File]::Delete($tmpPath) } catch {} }
