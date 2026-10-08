@@ -1,0 +1,68 @@
+{
+  "_readme": "monitor.ps1 专用设置。CampusNetLogin.exe 不读取本文件（它只读 campus_net_config.json），因此修改本文件不会影响登录功能。",
+  "background_window": {
+    "start": "07:00",
+    "end": "23:00",
+    "_note": "该时段内 exe 后台静默运行；时段外弹窗运行。想全天静默请设为 start=00:00 end=23:59"
+  },
+  "quiet_hours": {
+    "enabled": true,
+    "start": "23:00",
+    "end": "07:00",
+    "skip_auto_login": false,
+    "mute_notify": true,
+    "_note": "免打扰时段（支持跨午夜、精确到分钟）：时段内登录一律后台静默、不换壁纸、不弹通知。skip_auto_login=false 表示仍静默保活登录（不吵人也不会整夜断网）；改成 true 则时段内完全不自动登录，但 立即重连.bat 仍可手动触发。用 设置免打扰.bat 修改本段。"
+  },
+  "startup": {
+    "grace_sec": 150,
+    "retry_interval_sec": 20,
+    "_note": "开机宽限期：监控刚启动的 grace_sec 秒内网络不通，视为网卡/拨号尚未就绪——不切红色失败壁纸、不累积失败次数、不进冷却，而是每 retry_interval_sec 秒重试登录。专治「一开机就误报红屏」。设为 0 可关闭该功能。"
+  },
+  "ping": {
+    "targets": ["www.baidu.com", "www.qq.com", "bilibili.com"],
+    "count": 2,
+    "timeout_ms": 2000,
+    "interval_sec": 300
+  },
+  "session_probe": {
+    "enabled": true,
+    "url": "https://www.bilibili.com",
+    "timeout_ms": 8000,
+    "interval_sec": 3600,
+    "force_relogin_hours": 2,
+    "_note": "网络与 HTTP 均正常时跳过整点重登；超过 force_relogin_hours 仍会强制保活一次。探测异常时保守地执行登录。"
+  },
+  "retry": {
+    "consecutive_failures_before_cooldown": 5,
+    "cooldown_minutes": 60,
+    "backoff_base_sec": 300,
+    "backoff_max_sec": 1800,
+    "after_login_wait_sec": 120
+  },
+  "exe": {
+    "wait_ms": 180000,
+    "hide_edge_interval_sec": 5
+  },
+  "notify": {
+    "wallpaper": true,
+    "toast": true
+  },
+  "cleanup": {
+    "kill_exe_on_timeout": true,
+    "kill_exe_tree": false,
+    "temp_mei": true,
+    "temp_mei_max_age_hours": 6,
+    "interval_hours": 24,
+    "shots_keep_days": 7,
+    "shots_max_files": 40,
+    "logs_keep_days": 30,
+    "login_steps_max_bytes": 1048576,
+    "login_steps_keep_lines": 400,
+    "_note": "temp_mei 已开启：清理 %TEMP% 下超过 6 小时、且含 ddddocr 目录（确认为本程序解压产物）的 _MEI* 残留；被占用的目录会先改名隔离，下次再删。interval_hours 为整体清理周期。shots_keep_days / logs_keep_days 为保留天数（0=不按天数删）。shots_max_files 是截图数量上限，超出删最旧的，防止一天内大量截图撑爆磁盘。login_steps_max_bytes / keep_lines 是 exe 步骤日志的大小封顶：超过则只留末尾 N 行——这个文件是持续追加的，mtime 永远是新的，光靠天数永远删不掉它。"
+  },
+  "log": {
+    "max_bytes": 2097152,
+    "keep": 3,
+    "heartbeat_every_sec": 1800
+  }
+}

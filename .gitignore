@@ -1,0 +1,41 @@
+# ===== 打包与构建产物 =====
+bin/_internal/
+bin/CampusNetLogin.exe
+bin/*.exe
+dist/
+build/
+*.spec.bak
+
+# ===== 运行期产生的文件 =====
+bin/last_run_time.json
+bin/campus_net_config.json.bak
+bin/*.log
+bin/*.png
+
+logs/
+shots/
+
+config/monitor_heartbeat.json
+config/wallpaper_state.txt
+config/wallpaper_orig.txt
+config/wallpaper_rotation.txt
+config/last_retention.txt
+config/*.flag
+
+%TEMP% 下的 _MEI* 残留由程序自行回收，无需在此声明。
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

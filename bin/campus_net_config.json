@@ -1,0 +1,17 @@
+{
+  "campus_network": {
+    "account": "0",
+    "password": "0",
+    "login_url": "http://2.2.2.2",
+    "isp": "天翼校园网"
+  },
+  "test_url": "https://www.bilibili.com",
+  "bilibili_url": "https://www.bilibili.com",
+  "max_retries": 3,
+  "wait_after_login_seconds": 120,
+  "browser": "edge",
+  "background_window": {
+    "start": "07:00",
+    "end": "23:00"
+  }
+}

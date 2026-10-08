@@ -1,0 +1,24 @@
+# CampusNetLogin 依赖清单
+# 版本依据：从 CampusNetLogin.exe 的 PyInstaller 解压残留（%TEMP%\_MEI*）与 PYZ 中确认
+# 安装：pip install -r requirements.txt
+
+# 浏览器自动化（驱动系统已安装的 Edge，channel="msedge"）
+playwright
+
+# 验证码 OCR
+ddddocr
+onnxruntime
+
+# 图像处理
+opencv-python
+numpy
+Pillow
+
+# 进程查询
+psutil
+
+# Windows 注册表/窗口（pywin32，winreg 为标准库）
+pywin32
+
+# 打包工具（仅构建 exe 时需要）
+pyinstaller
