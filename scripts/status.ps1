@@ -151,6 +151,8 @@ if (Test-Path $stateWall) {
         Say ("  已记录原始壁纸: " + [System.IO.File]::ReadAllText($origWall).Trim().Trim([char]0xFEFF))
     } else {
         Warn "  未记录原始壁纸，恢复时可能只能用提示图兜底（可用 还原壁纸.bat 手动指定）"
+    $bak0 = @(Get-ChildItem -LiteralPath $configDir -Filter "wallpaper_backup.*" -File -ErrorAction SilentlyContinue)   # [v2.9.6]
+    if ($bak0.Count -ge 1) { Say ("  但存在系统缓存备份: " + $bak0[0].Name + "（还原时会自动使用）") }
     }
 } elseif (Test-Path $origWall) {
     Warn "残留了原始壁纸记录但没有失败标记（监控下次循环会自动清理）"

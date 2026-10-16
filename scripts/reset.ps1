@@ -160,6 +160,7 @@ foreach ($f in @("monitor_heartbeat.json", "wallpaper_state.txt", "wallpaper_ori
                  "last_retention.txt", "pause.flag", "reconnect.flag")) {
     Remove-FileIfExists (Join-Path $configDir $f) ("config\" + $f)
 }
+Remove-Globed $configDir "wallpaper_backup.*" "config\ 壁纸缓存备份"   # [v2.9.6]
 Remove-FileIfExists (Join-Path $rootDir "monitor.log") "根目录遗留 monitor.log"
 Say "    已保留：bin\ 程序本体与账号、config\monitor_settings.json、scripts\、src\、docs\"
 

@@ -49,6 +49,27 @@
 #          密码填错后改对，最坏要等满 60 分钟冷却才会重试。
 #   [新增] 配合 set_account.ps1：保存账号密码成功后自动写 reconnect.flag，
 #          实现「保存即自动重试一次」，不必再手动双击 立即重连.bat。
+#
+# v2.9.5 相对 v2.9.4 的改动：
+#   [修复] 壁纸还原失败的残余缺口：以前 SetOkWallpaper 无条件清除失败标记，
+#          万一"还原"这一步本身失败（原壁纸文件被删、恢复提示图生成或应用失败），
+#          标记照样被清掉，之后所有自愈点都认为"没有失败态"，红屏永久留在桌面且不再重试。
+#          现在只有【确认桌面已回到正常状态】才清标记；失败则保留标记并于 60s 后重试。
+#   [修复] ApplyWallpaper 不再无条件返回成功：Win32 分支校验 SystemParametersInfo 返回值，
+#          注册表分支回读比对，避免"设置失败却被当成还原成功"。
+
+# v2.9.6 相对 v2.9.5 的改动：
+#   [修复] 幻灯片 / Windows 聚焦 / 动态壁纸下"网络已恢复但红屏不消失"：
+#          这类背景的注册表 Wallpaper 指向 Windows 转码缓存
+#          （%APPDATA%\Microsoft\Windows\Themes\TranscodedWallpaper），
+#          它会被当成"用户原图"记录下来；而"切红屏"这一下，Windows 恰好会把红图
+#          转码【覆盖】进同一个缓存文件 —— 于是"还原"= 把红图再设一遍，
+#          桌面永久红屏，日志却还报"已还原为原始壁纸"。
+#          新增 Test-SystemWallCache 守卫：系统主题缓存目录内的一切路径都不作为原图。
+#   [新增] 切红屏前把该缓存【内容】备份到 config\wallpaper_backup.<png|jpg|bmp>，
+#          还原时改用它 —— 红屏功能照旧，用户那张壁纸还能真正回到桌面
+#          （没有备份时退回绿色"已恢复"提示图，至少不卡死）。
+#   [调整] 还原壁纸.bat / 重置脚本同步识别该缓存，并一并清理备份文件。
 
 $ErrorActionPreference = "Continue"
 
@@ -83,6 +104,7 @@ $reconnectFile= Join-Path $configDir "reconnect.flag"
 $versionFile  = Join-Path $rootDir "VERSION"
 $retentionFile= Join-Path $configDir "last_retention.txt"
 $hbFile       = Join-Path $configDir "monitor_heartbeat.json"
+$themesDir    = Join-Path $env:APPDATA "Microsoft\Windows\Themes"   # [v2.9.6] Windows 主题缓存目录（幻灯片/聚焦壁纸的 Wallpaper 值指向这里）
 $script:hbStaleSec = 900      # 心跳超过 15 分钟未刷新即视为僵死，可被新实例接管
 
 # ---------------- 日志 ----------------
@@ -422,14 +444,18 @@ function Show-Toast($title, $text) {
 }
 
 function ApplyWallpaper($path) {
+    # [v2.9.5] 返回值必须是"真的设置成功了"。以前 Win32 分支无条件 return $true，
+    # 于是连"设置失败"都会被当成还原成功 —— 调用方随即清掉失败标记，红屏再也不会重试。
     if ($script:HasWin32) {
-        [NetWin]::SystemParametersInfo(20, 0, $path, 3) | Out-Null
-        return $true
+        $r = [NetWin]::SystemParametersInfo(20, 0, $path, 3)
+        return ([int]$r -ne 0)
     }
     try {
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name Wallpaper -Value $path
-        Start-Process -FilePath "rundll32.exe" -ArgumentList "user32.dll,UpdatePerUserSystemParameters" -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
-        return $true
+        Start-Process -FilePath "rundll32.exe" -ArgumentList "user32.dll,UpdatePerUserSystemParameters" -WindowStyle Hidden -ErrorAction SilentlyContinue
+        # 回读注册表确认值确实写进去了（rundll32 的应用是异步的，这里只确认写入成功）
+        $cur = (Get-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name Wallpaper -ErrorAction Stop).Wallpaper
+        return ([string]$cur -eq [string]$path)
     } catch {
         return $false
     }
@@ -987,6 +1013,99 @@ function Get-CurrentWallpaper {
     return ""
 }
 
+# ---------------- [v2.9.6] 系统主题缓存守卫 ----------------
+# Windows 的幻灯片 / 聚焦 / 动态壁纸，其注册表 Wallpaper 值并不指向用户挑的那张图，
+# 而是指向 %APPDATA%\Microsoft\Windows\Themes\TranscodedWallpaper 这个"转码缓存"。
+# 而任何一次 SPI_SETDESKWALLPAPER 都会让 Windows 重新生成该文件 —— 包括我们自己切红屏。
+# 所以：缓存目录里的东西【不能】被当成"用户的原始壁纸"，否则还原= 再设一遍红图。
+function Test-SystemWallCache([string]$p) {
+    if (-not $p) { return $false }
+    try { $p = [System.IO.Path]::GetFullPath($p) } catch {}
+    $p = ([string]$p).Trim().TrimEnd('\')
+    if (-not $p) { return $false }
+    # ① 文件名特征
+    if (($p -like "*\Microsoft\Windows\Themes\TranscodedWallpaper") -or
+        ($p -like "*\Microsoft\Windows\Themes\Transcoded_*")) { return $true }
+    # ② 目录特征：整个主题缓存目录。里面全是 Windows 自己生成/管理的文件
+    #    （TranscodedWallpaper / Transcoded_000 / slideshow.ini / TranscodedImageCache…），
+    #    没有一张是用户自己挑的图片。
+    $th = ""
+    try { $th = [System.IO.Path]::GetFullPath($themesDir).TrimEnd('\') } catch {}
+    if (-not $th) {   # 兜底：万一 $themesDir 不在作用域内，规则②也不能失效
+        try { $th = [System.IO.Path]::GetFullPath((Join-Path $env:APPDATA "Microsoft\Windows\Themes")).TrimEnd('\') } catch {}
+    }
+    if ($th -and $p.Length -gt $th.Length) {
+        if ($p.Substring(0, $th.Length).ToLower() -eq $th.ToLower() -and $p[$th.Length] -eq '\') { return $true }
+    }
+    return $false
+}
+
+# 清掉历史遗留的缓存备份（扩展名按内容嗅探，故用通配）
+function Clear-WallpaperBackup {
+    try {
+        Get-ChildItem -LiteralPath $configDir -Filter "wallpaper_backup.*" -File -ErrorAction SilentlyContinue |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    } catch {}
+}
+
+# [v2.9.6] 把系统主题缓存的内容复制到 config 下，供还原时使用。
+# 缓存文件本身没有扩展名，这里按文件头嗅探给一个正确后缀（不改内容），
+# 避免个别系统对无后缀路径处理异常；认不出的格式就不备份（调用方退回守卫行为）。
+function Backup-SystemWallCache($src) {
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($src)
+        if ($bytes.Length -lt 8) { return "" }
+        $ext = ""
+        if ($bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50 -and $bytes[2] -eq 0x4E -and $bytes[3] -eq 0x47) { $ext = ".png" }
+        elseif ($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xD8) { $ext = ".jpg" }
+        elseif ($bytes[0] -eq 0x42 -and $bytes[1] -eq 0x4D) { $ext = ".bmp" }
+        if (-not $ext) { return "" }
+        Clear-WallpaperBackup
+        $dst = Join-Path $configDir ("wallpaper_backup" + $ext)
+        [System.IO.File]::WriteAllBytes($dst, $bytes)
+        # 记下"这份备份是从哪个系统缓存文件来的"，还原成功后要把内容写回它
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $configDir "wallpaper_backup.src"), [string]$src,
+                                           (New-Object System.Text.UTF8Encoding($false)))
+        } catch {}
+        return $dst
+    } catch { return "" }
+}
+# 判断某个路径是不是本程序放在 config 下的缓存备份
+function Test-IsWallpaperBackup([string]$p) {
+    if (-not $p) { return $false }
+    try { $p = [System.IO.Path]::GetFullPath($p) } catch { return $false }
+    $d = ""; $n = ""; $cd = ""
+    try { $d  = [System.IO.Path]::GetDirectoryName($p).TrimEnd('\') } catch {}
+    try { $n  = [System.IO.Path]::GetFileName($p) } catch {}
+    try { $cd = [System.IO.Path]::GetFullPath($configDir).TrimEnd('\') } catch {}
+    if (-not $d -or -not $n) { return $false }
+    return (($d.ToLower() -eq $cd.ToLower()) -and $n.ToLower().StartsWith("wallpaper_backup."))
+}
+
+# [v2.9.6] 备份只是"临时替身"：还原成功后要把内容写回原来的系统主题缓存文件，
+# 并让桌面重新指向缓存文件 —— 否则注册表指向的备份一旦被清理，重启后桌面会变成默认壁纸。
+function Restore-BackupToCache($bak) {
+    try {
+        $srcFile = Join-Path $configDir "wallpaper_backup.src"
+        if (-not (Test-Path -LiteralPath $srcFile)) { return }
+        $src = [System.IO.File]::ReadAllText($srcFile, [System.Text.Encoding]::UTF8).Trim().Trim([char]0xFEFF)
+        if (-not $src) { return }
+        $dir = ""
+        try { $dir = Split-Path -Parent $src } catch {}
+        if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { return }
+        [System.IO.File]::WriteAllBytes($src, [System.IO.File]::ReadAllBytes($bak))
+        if (ApplyWallpaper $src) {
+            Log ("WALLPAPER: 原图已写回系统主题缓存并让桌面指回它 -> " + $src) "INFO"
+        } else {
+            Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name Wallpaper -Value $src -ErrorAction SilentlyContinue
+            Log "WALLPAPER: 原图已写回系统主题缓存，但让桌面指回它未成功（当前画面不受影响；若重启后壁纸不对，到 个性化->背景 重选一次即可）" "WARN"
+        }
+    } catch {
+        Log "WALLPAPER: 写回系统主题缓存失败（当前画面不受影响；若重启后壁纸不对，到 个性化->背景 重选一次即可）" "WARN"
+    }
+}
+
 # 兜底来源：开机早期 Wallpaper 值可能还是空的，而 TranscodedImageCache 已存着上次那张图
 function Get-WallpaperFromCache {
     try {
@@ -996,7 +1115,8 @@ function Get-WallpaperFromCache {
         $i = $s.IndexOf([char]0)
         if ($i -ge 0) { $s = $s.Substring(0, $i) }
         $s = $s.Trim().Trim([char]0xFEFF)
-        if ($s -and (Test-Path -LiteralPath $s)) { return $s }
+        # [v2.9.6] 系统主题缓存不能作为"原图"（其内容会被我们切红屏那一下覆盖）
+        if ($s -and (-not (Test-SystemWallCache $s)) -and (Test-Path -LiteralPath $s)) { return $s }
     } catch {}
     return ""
 }
@@ -1008,6 +1128,18 @@ function Save-OriginalWallpaper {
     # 自家生成的提示图不能当成"原始壁纸"存下来
     if ($cur -and ($cur -like "*campus_fail*" -or $cur -like "*campus_ok*")) { $cur = "" }
     if (-not $cur) { $cur = Get-WallpaperFromCache }
+    # [v2.9.6] 系统主题缓存：路径确实"存在"，但它的内容会被紧接着的"切红屏"覆盖掉。
+    # 直接把它当原图记录，等于还原时把红图再设一遍（永久红屏）——改为在覆盖前备份内容。
+    if ($cur -and (Test-SystemWallCache $cur)) {
+        $bak = Backup-SystemWallCache $cur
+        if ($bak) {
+            Log ("WALLPAPER: 原始壁纸是系统主题缓存，已备份其内容 -> " + $bak) "INFO"
+            $cur = $bak
+        } else {
+            Log ("WALLPAPER: 原始壁纸是系统主题缓存且备份失败，不予记录: " + $cur) "WARN"
+            $cur = ""
+        }
+    }
     if ($cur -and (Test-Path -LiteralPath $cur)) {
         try {
             # 必须无 BOM：带 BOM 的路径 Test-Path 会失败，恢复时就只能退回提示图了
@@ -1038,23 +1170,38 @@ function Clear-FailState {
     foreach ($f in @($stateFile, $origWallFile)) {
         if (Test-Path $f) { try { [System.IO.File]::Delete($f) } catch {} }
     }
+    Clear-WallpaperBackup     # [v2.9.6] 还原成功后，缓存备份也就没用了
 }
 function Has-FailState {
     return ((Test-Path $stateFile) -or (Test-Path $origWallFile))
 }
 
 function Restore-OriginalWallpaper {
+    # 返回值语义（[v2.9.5] 明确）：
+    #   $true  = 桌面已处于正常状态：要么已成功还原，要么本来就不是我们改的、无需处理
+    #   $false = 确实需要还原却没做成 -> 调用方【必须保留失败标记】，稍后重试
     # 优先还原用户原本的壁纸
     $orig = $null
     if (Test-Path $origWallFile) {
         try { $orig = [System.IO.File]::ReadAllText($origWallFile).Trim().Trim([char]0xFEFF) } catch {}
     }
+    # [v2.9.6] 旧版本可能已经把系统主题缓存写进了记录文件，那时该缓存内容早已被红图覆盖，
+    # 按它"还原"就是把红图再设一遍 —— 必须放弃，改走备份 / 绿色提示图兜底。
+    if ($orig -and (Test-SystemWallCache $orig)) {
+        Log ("WALLPAPER: 记录的原图是系统主题缓存（内容已被失败壁纸覆盖），放弃按它还原: " + $orig) "WARN"
+        $orig = $null
+    }
     if (-not $orig) { $orig = Get-WallpaperFromCache }
     if ($orig -and (Test-Path -LiteralPath $orig)) {
         if (ApplyWallpaper $orig) {
             Log ("WALLPAPER: 已还原为原始壁纸 -> " + $orig) "INFO"
+            # 用的是缓存备份：把内容写回系统缓存并让桌面指回它，之后才能安全清理备份
+            if (Test-IsWallpaperBackup $orig) { Restore-BackupToCache $orig }
             return $true
         }
+        Log ("WALLPAPER: 应用原始壁纸未成功（文件在但设置没生效）-> 保留失败标记，稍后重试: " + $orig) "WARN"
+    } elseif ($orig) {
+        Log ("WALLPAPER: 记录的原始壁纸文件已不存在 -> 改用恢复提示图: " + $orig) "WARN"
     }
     # 没有原始壁纸记录时，只有在确认当前桌面确实是我们自己那张红图的前提下才顶掉它；
     # 否则宁可不动——把用户自己换的壁纸覆盖成绿色提示图是没法撤销的。
@@ -1071,9 +1218,15 @@ function Restore-OriginalWallpaper {
     }
     $tmp = Join-Path $env:TEMP "campus_ok.bmp"
     if (MakeWallpaper $tmp @(30, 130, 70) "校园网已恢复连接" $script:devWallBadge) {
-        if (ApplyWallpaper $tmp) { Log "WALLPAPER: 已切换为【已恢复】壁纸（未找到原始壁纸）" "INFO" }
+        if (ApplyWallpaper $tmp) {
+            Log "WALLPAPER: 已切换为【已恢复】壁纸（未找到原始壁纸）" "INFO"
+            return $true
+        }
+        Log "WALLPAPER: 恢复提示图应用未成功 -> 保留失败标记，稍后重试" "WARN"
+    } else {
+        Log "WALLPAPER: 恢复提示图生成失败 -> 保留失败标记，稍后重试" "WARN"
     }
-    return $true
+    return $false
 }
 
 function SetFailWallpaper {
@@ -1130,10 +1283,27 @@ function SetFailWallpaper {
 }
 
 function SetOkWallpaper {
-    if (-not $script:notifyWallpaper) { Clear-FailState; return }   # 关闭壁纸提示时只清标记，不动桌面
-    Restore-OriginalWallpaper | Out-Null
-    Show-Toast "校园网已恢复" "连接已重新建立"
-    Clear-FailState
+    # 返回值：$true = 桌面已确认回到正常状态（失败标记已清）
+    #         $false = 还原没做成（失败标记保留，稍后重试）
+    # [v2.9.5] 以前这里是无条件 Clear-FailState：万一"还原"这一步本身失败（原壁纸文件被删、
+    # 恢复提示图生成或应用失败），标记照样被清掉，之后所有自愈点都认为"没有失败态"，
+    # 红屏就永久留在桌面上、再也不会重试 —— 这是壁纸卡住那个历史 bug 的残余缺口。
+    if (-not $script:notifyWallpaper) { Clear-FailState; return $true }   # 关闭壁纸提示时只清标记，不动桌面
+    if ($null -eq $script:nextRestoreAt) { $script:nextRestoreAt = [datetime]::MinValue }
+    if ($null -eq $script:restoreFail)   { $script:restoreFail = 0 }
+    if ((Get-Date) -lt $script:nextRestoreAt) { return $false }   # 上次还原失败后的 60s 冷却期内不重复尝试
+    if (Restore-OriginalWallpaper) {
+        $script:restoreFail   = 0
+        $script:nextRestoreAt = [datetime]::MinValue
+        Show-Toast "校园网已恢复" "连接已重新建立"
+        Clear-FailState
+        return $true
+    }
+    # 还原没成功：保留两个状态文件，60s 后由各个自愈点继续重试；不弹"已恢复"通知，避免反复打扰
+    $script:restoreFail = [int]$script:restoreFail + 1
+    $script:nextRestoreAt = (Get-Date).AddSeconds(60)
+    Log ("WALLPAPER: 还原动作未成功（第 " + $script:restoreFail + " 次），保留失败标记，60s 后重试；若长期如此可双击 还原壁纸.bat 手动处理") "WARN"
+    return $false
 }
 
 # 壁纸状态自愈：只要还留着失败标记，就在每个循环点检查网络是否已恢复，
@@ -1142,13 +1312,15 @@ function SetOkWallpaper {
 function Sync-FailWallpaper {
     param([string]$NetState = "")        # "up"=已知网络通 / "down"=已知断 / ""=自行探测
     if (-not (Has-FailState)) { return }
+    # 还原失败后的冷却期内直接跳过：否则每个循环点都会重复打一遍同样的日志
+    if ($script:nextRestoreAt -and ((Get-Date) -lt $script:nextRestoreAt)) { return }
     $ok = $false
     if ($NetState -eq "up")        { $ok = $true }
     elseif ($NetState -eq "down")  { return }
     else                           { $ok = IsNetworkOK }
     if ($ok) {
         Log "WALLPAPER: 网络已恢复但仍留有失败标记 -> 立即还原壁纸" "INFO"
-        SetOkWallpaper
+        SetOkWallpaper | Out-Null
     }
 }
 
@@ -1479,18 +1651,18 @@ if (Test-Path $stateFile) {
     while ((Get-Date) -lt $deadline) {
         if (IsNetworkOK) {
             Log "INIT: 检测到遗留的失败标记但网络已恢复 -> 还原壁纸" "INFO"
-            SetOkWallpaper
-            $restored = $true
+            $restored = [bool](SetOkWallpaper)   # [v2.9.5] 以真实结果为准：还原失败要留给主循环重试
             break
         }
         Start-Sleep -Seconds 10
     }
     if (-not $restored) {
-        Log ("INIT: 遗留失败标记，等待 " + $waitMax + "s 网络仍未通 -> 保持失败壁纸，交由主循环处理") "WARN"
+        Log ("INIT: 遗留失败标记未解除（网络未通或还原未成功）-> 保持失败壁纸，交由主循环处理") "WARN"
     }
 } elseif (Test-Path $origWallFile) {
     # 没有失败标记却留着原始壁纸记录：状态不一致，清掉即可（壁纸并不在失败态）
     try { [System.IO.File]::Delete($origWallFile) } catch {}
+    Clear-WallpaperBackup     # [v2.9.6]
 }
 $lastProbe     = [datetime]::MinValue
 $lastHeartbeat = [datetime]::MinValue
